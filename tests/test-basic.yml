@@ -1,0 +1,67 @@
+name: Test basic issue creation
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Jira and write config
+        run: |
+          rm -rf /tmp/mock-jira
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-jira.js" 8089 /tmp/mock-jira > /tmp/mock-jira.out 2>&1 &
+          for i in $(seq 1 30); do
+            if node -e "require('http').get('http://127.0.0.1:8089/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"; then
+              echo "mock ready"; break
+            fi
+            sleep 1
+          done
+          mkdir -p "$HOME/jira" "$HOME/.jira.d"
+          rm -f "$HOME/.jira.d/config.yml"
+          cat > "$HOME/jira/config.yml" <<'EOF'
+          baseUrl: http://127.0.0.1:8089
+          token: test-token
+          email: test@example.com
+          EOF
+          cat "$HOME/jira/config.yml"
+      - id: action
+        uses: .
+        with:
+          project: TEST
+          issuetype: Task
+          summary: Basic summary
+      - name: Assert issue output
+        env:
+          ACTUAL: ${{ steps.action.outputs.issue }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "TEST-123" ]; then
+            echo "FAIL: expected 'TEST-123'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert request payload
+        run: |
+          cat /tmp/mock-jira/requests.log
+          node -e '
+            const lines = require("fs").readFileSync("/tmp/mock-jira/requests.log","utf8").trim().split("\n").map(JSON.parse);
+            const meta = lines.find(l => l.path === "/rest/api/2/issue/createmeta");
+            if (!meta) { console.log("FAIL: createmeta not called"); process.exit(1); }
+            if (meta.query.projectKeys !== "TEST" || meta.query.issuetypeNames !== "Task") { console.log("FAIL: bad createmeta query", meta.query); process.exit(1); }
+            const exp = "Basic " + Buffer.from("test@example.com:test-token").toString("base64");
+            if (meta.authorization !== exp) { console.log("FAIL: bad auth header", meta.authorization); process.exit(1); }
+            const post = lines.filter(l => l.method === "POST" && l.path === "/rest/api/2/issue");
+            if (post.length !== 1) { console.log("FAIL: expected exactly 1 create call"); process.exit(1); }
+            const f = post[0].body.fields;
+            if (f.project.key !== "TEST" || f.issuetype.name !== "Task" || f.summary !== "Basic summary") { console.log("FAIL: bad fields", f); process.exit(1); }
+            if ("description" in f) { console.log("FAIL: description should be absent"); process.exit(1); }
+            console.log("PASS");
+          '
+      - name: Assert config files updated
+        run: |
+          cat "$HOME/jira/config.yml"
+          grep -q "issue: TEST-123" "$HOME/jira/config.yml" || { echo "FAIL: jira/config.yml missing issue"; exit 1; }
+          grep -q "baseUrl: http://127.0.0.1:8089" "$HOME/jira/config.yml" || { echo "FAIL: original config lost"; exit 1; }
+          cat "$HOME/.jira.d/config.yml"
+          grep -q "issue: TEST-123" "$HOME/.jira.d/config.yml" || { echo "FAIL: .jira.d/config.yml missing issue"; exit 1; }
+          echo "PASS"

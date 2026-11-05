@@ -1,0 +1,54 @@
+name: Test invalid fields JSON
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Jira and write config
+        run: |
+          rm -rf /tmp/mock-jira
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-jira.js" 8089 /tmp/mock-jira > /tmp/mock-jira.out 2>&1 &
+          for i in $(seq 1 30); do
+            if node -e "require('http').get('http://127.0.0.1:8089/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"; then
+              echo "mock ready"; break
+            fi
+            sleep 1
+          done
+          mkdir -p "$HOME/jira" "$HOME/.jira.d"
+          rm -f "$HOME/.jira.d/config.yml"
+          cat > "$HOME/jira/config.yml" <<'EOF'
+          baseUrl: http://127.0.0.1:8089
+          token: test-token
+          email: test@example.com
+          EOF
+      - id: action
+        uses: .
+        continue-on-error: true
+        with:
+          project: TEST
+          issuetype: Task
+          summary: Bad fields
+          fields: '{not valid json'
+      - name: Assert action failed without creating an issue
+        env:
+          OUTCOME: ${{ steps.action.outcome }}
+          ISSUE: ${{ steps.action.outputs.issue }}
+        run: |
+          echo "outcome: $OUTCOME"
+          echo "issue: $ISSUE"
+          cat /tmp/mock-jira/requests.log
+          if [ "$OUTCOME" != "failure" ]; then
+            echo "FAIL: expected failure"
+            exit 1
+          fi
+          if [ -n "$ISSUE" ]; then
+            echo "FAIL: issue output should be empty"
+            exit 1
+          fi
+          if grep -q '"method":"POST"' /tmp/mock-jira/requests.log; then
+            echo "FAIL: create endpoint should not be called"
+            exit 1
+          fi
+          echo "PASS"

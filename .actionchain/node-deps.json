@@ -1,0 +1,12 @@
+{
+  "status": "self_contained",
+  "entries": [
+    {
+      "path": "dist/index.js",
+      "status": "self_contained",
+      "warnings": [
+        "unsupported-require-call: This call to \"require\" will not be bundled because the argument is not a string literal"
+      ]
+    }
+  ]
+}

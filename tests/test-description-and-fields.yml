@@ -1,0 +1,59 @@
+name: Test description and additional fields
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Start mock Jira and write config
+        run: |
+          rm -rf /tmp/mock-jira
+          nohup node "$GITHUB_WORKSPACE/tests/fixtures/mock-jira.js" 8089 /tmp/mock-jira > /tmp/mock-jira.out 2>&1 &
+          for i in $(seq 1 30); do
+            if node -e "require('http').get('http://127.0.0.1:8089/health', r => process.exit(r.statusCode === 200 ? 0 : 1)).on('error', () => process.exit(1))"; then
+              echo "mock ready"; break
+            fi
+            sleep 1
+          done
+          mkdir -p "$HOME/jira" "$HOME/.jira.d"
+          rm -f "$HOME/.jira.d/config.yml"
+          cat > "$HOME/jira/config.yml" <<'EOF'
+          baseUrl: http://127.0.0.1:8089
+          token: test-token
+          email: test@example.com
+          EOF
+      - id: action
+        uses: .
+        with:
+          project: OPS
+          issuetype: Incident
+          summary: Something broke
+          description: Detailed description here
+          fields: '{"customfield_10171": "test", "labels": ["a", "b"], "priority": {"name": "High"}}'
+      - name: Assert issue output
+        env:
+          ACTUAL: ${{ steps.action.outputs.issue }}
+        run: |
+          echo "actual: $ACTUAL"
+          if [ "$ACTUAL" != "OPS-123" ]; then
+            echo "FAIL: expected 'OPS-123'"
+            exit 1
+          fi
+          echo "PASS"
+      - name: Assert payload includes description and fields
+        run: |
+          cat /tmp/mock-jira/requests.log
+          node -e '
+            const lines = require("fs").readFileSync("/tmp/mock-jira/requests.log","utf8").trim().split("\n").map(JSON.parse);
+            const post = lines.filter(l => l.method === "POST" && l.path === "/rest/api/2/issue");
+            if (post.length !== 1) { console.log("FAIL: expected exactly 1 create call"); process.exit(1); }
+            const f = post[0].body.fields;
+            const ok = f.project.key === "OPS" && f.issuetype.name === "Incident" && f.summary === "Something broke"
+              && f.description === "Detailed description here"
+              && f.customfield_10171 === "test"
+              && JSON.stringify(f.labels) === JSON.stringify(["a","b"])
+              && f.priority && f.priority.name === "High";
+            if (!ok) { console.log("FAIL: unexpected fields", JSON.stringify(f)); process.exit(1); }
+            console.log("PASS");
+          '
